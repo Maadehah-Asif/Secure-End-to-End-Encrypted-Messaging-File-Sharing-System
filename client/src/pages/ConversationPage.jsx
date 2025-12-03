@@ -2,8 +2,13 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext.jsx'
 import * as sm from '../session/sessionManager.js'
+import { uploadFileChunks, fetchAndAssembleFile, listAvailableFilenames } from '../session/files.js'
 import MainLayout from '../components/MainLayout.jsx'
 import '../styles/forms.css'
+import chatIcon from '../assets/icons/chat.png'
+import commentIcon from '../assets/icons/comment.png'
+import uploadIcon from '../assets/icons/publish.png'
+import refreshIcon from '../assets/icons/refresh.png'
 
 export default function ConversationPage() {
   const { username: targetUsername } = useParams()
@@ -12,13 +17,40 @@ export default function ConversationPage() {
   const [passphrase, setPassphrase] = useState('')
   const [keysUnlocked, setKeysUnlocked] = useState(false)
   const [status, setStatus] = useState('')
+  const [statusEvents, setStatusEvents] = useState([])
   const [sessionId, setSessionId] = useState(null)
   const [sessionEstablished, setSessionEstablished] = useState(false)
   const [sessionExists, setSessionExists] = useState(false)
   const [incomingInitExists, setIncomingInitExists] = useState(false)
   const [incomingList, setIncomingList] = useState([])
+  const [fileToUpload, setFileToUpload] = useState(null)
+  const [filesList, setFilesList] = useState([])
+  const [downloadName, setDownloadName] = useState('')
   const [canCompose, setCanCompose] = useState(false)
   const [messages, setMessages] = useState([])
+  const mergeMessages = (existing, incoming) => {
+    const byId = new Map()
+    for (const m of existing) {
+      byId.set(m._id || m.id || `${m.sender}-${m.timestamp}`, m)
+    }
+    for (const m of incoming) {
+      const key = m._id || m.id || `${m.sender}-${m.timestamp}`
+      const prev = byId.get(key)
+      if (!prev) byId.set(key, m)
+      else {
+        // prefer item that has more fields set (e.g., server _id)
+        const merged = { ...prev, ...m }
+        byId.set(key, merged)
+      }
+    }
+    const arr = Array.from(byId.values())
+    arr.sort((a, b) => {
+      const ta = new Date(a.timestamp).getTime()
+      const tb = new Date(b.timestamp).getTime()
+      return ta - tb
+    })
+    return arr
+  }
   const [newMsg, setNewMsg] = useState('')
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000'
@@ -144,7 +176,16 @@ export default function ConversationPage() {
     if (!newMsg) return
     try {
       const { sendMessage: sendMsg } = await import('../session/messages.js')
-      await sendMsg({ apiUrl, token, sessionId, passphrase, plaintext: newMsg, senderUsername: user.username })
+      const localTs = new Date().toISOString()
+      // optimistic append locally
+      setMessages(list => mergeMessages(list, [{ id: `local-${localTs}`, sender: user.username, text: newMsg, timestamp: localTs }]))
+      // send to server
+      const saved = await sendMsg({ apiUrl, token, sessionId, passphrase, plaintext: newMsg, senderUsername: user.username })
+      // saved may contain _id/timestamp; merge to replace optimistic item
+      if (saved) {
+        const serverItem = Array.isArray(saved) ? saved[saved.length - 1] : saved
+        setMessages(list => mergeMessages(list, [serverItem]))
+      }
       setStatus('Message sent')
       setNewMsg('')
     } catch (err) {
@@ -158,7 +199,7 @@ export default function ConversationPage() {
     try {
       const { fetchAndDecrypt } = await import('../session/messages.js')
       const res = await fetchAndDecrypt({ apiUrl, token, sessionId, passphrase })
-      setMessages(res)
+      setMessages(list => mergeMessages(list, res))
       setStatus('Fetched ' + res.length + ' messages')
     } catch (err) {
       setStatus('Fetch error: ' + err.message)
@@ -167,6 +208,9 @@ export default function ConversationPage() {
 
   return (
     <MainLayout>
+      <button onClick={() => window.location.assign('/')} className="back-button" style={{ marginBottom: 8 }}>
+        ← Back
+      </button>
       <div className="card">
         <h2>Chat with @{targetUsername}</h2>
       </div>
@@ -177,6 +221,8 @@ export default function ConversationPage() {
           <label>Local passphrase</label>
           <input type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} />
         </div>
+
+        {/* Files controls should be under the messaging area (Step 3) */}
         <div style={{ marginTop: 8 }}>
           <button className="btn" onClick={unlockKeys}>Unlock keys</button>
         </div>
@@ -344,7 +390,7 @@ export default function ConversationPage() {
                 } catch (e) {
                   setStatus('Incoming refresh error: ' + e.message)
                 }
-              }}>Refresh incoming</button>
+              }}><img src={refreshIcon} className="icon-sm" alt="refresh" />Refresh inbox</button>
               {incomingList.length > 0 && (
                 <div style={{ marginTop: 8 }}>
                   <div className="small">Incoming requests:</div>
@@ -395,12 +441,107 @@ export default function ConversationPage() {
           <label>Message</label>
           <textarea rows={3} value={newMsg} onChange={e => setNewMsg(e.target.value)} style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #e5e7eb' }} />
           <div style={{ marginTop: 6 }}>
-            <button className="btn" onClick={sendMessage} disabled={!sessionEstablished}>Send message</button>
+            <button className="btn" onClick={async () => {
+              setStatus('Sending message...')
+              setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Sending message...' }])
+              try {
+                await sendMessage()
+                setStatus('Message sent')
+                setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Message sent' }])
+              } catch (e) {
+                setStatus('Send error: ' + e.message)
+                setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Send error: ' + e.message }])
+              }
+            }} disabled={!sessionEstablished}>Send message</button>
             {sessionEstablished && (
-              <button className="btn" onClick={refreshMessages} style={{ marginLeft: 8 }}>Refresh messages</button>
+              <button className="btn" onClick={async () => {
+                setStatus('Refreshing messages...')
+                setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Refreshing messages...' }])
+                try {
+                  await refreshMessages()
+                  setStatus('Messages refreshed')
+                  setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Messages refreshed' }])
+                } catch (e) {
+                  setStatus('Refresh error: ' + e.message)
+                  setStatusEvents(evts => [...evts, { ts: Date.now(), text: 'Refresh error: ' + e.message }])
+                }
+              }} style={{ marginLeft: 8 }}><img src={refreshIcon} className="icon-sm" alt="refresh" />Refresh messages</button>
             )}
           </div>
         </div>
+
+        {sessionEstablished && (
+          <div style={{ marginTop: 16 }}>
+            <h4>Files</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="file" onChange={e => setFileToUpload(e.target.files && e.target.files[0] ? e.target.files[0] : null)} />
+              <button className="btn" disabled={!fileToUpload} onClick={async () => {
+                if (!fileToUpload) return
+                setStatus('Encrypting and sending file...')
+                try {
+                  await uploadFileChunks({ apiUrl, token, sessionId, passphrase, file: fileToUpload, senderUsername: user.username, chunkSize: 256 * 1024 })
+                  setStatus('File sent successfully')
+                  setFileToUpload(null)
+                  try {
+                    const { sendMessage: sendMsg } = await import('../session/messages.js')
+                    const notice = `File sent: ${fileToUpload.name}. Refresh files to download!`
+                    const localTs = new Date().toISOString()
+                    setMessages(list => mergeMessages(list, [{ id: `local-file-${localTs}`, sender: user.username, text: notice, timestamp: localTs }]))
+                    const saved = await sendMsg({ apiUrl, token, sessionId, passphrase, plaintext: notice, senderUsername: user.username })
+                    if (saved) {
+                      const serverItem = Array.isArray(saved) ? saved[saved.length - 1] : saved
+                      setMessages(list => mergeMessages(list, [serverItem]))
+                    }
+                  } catch (e) {
+                    setStatus(prev => prev + ' (Notice send failed: ' + e.message + ')')
+                  }
+                } catch (e) {
+                  setStatus('Send error: ' + e.message)
+                }
+              }}>Send file</button>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <button className="btn" onClick={async () => {
+                setStatus('Refreshing available files...')
+                try {
+                  const names = await listAvailableFilenames({ apiUrl, token, sessionId, passphrase })
+                  setFilesList(names)
+                  setStatus(names.length ? 'Files list updated' : 'No files available')
+                } catch (e) {
+                  setStatus('Files refresh error: ' + e.message)
+                }
+              }}><img src={refreshIcon} className="icon-sm" alt="refresh" />Refresh files</button>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {filesList.length === 0 ? (
+                <div className="small">No files available yet</div>
+              ) : (
+                filesList.map(item => (
+                  <div key={item.filenameHash} className="small" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                    <span>{item.filename}</span>
+                    <button className="btn" onClick={async () => {
+                      setStatus('Fetching and decrypting file...')
+                      try {
+                        const { blob, filename } = await fetchAndAssembleFile({ apiUrl, token, sessionId, passphrase, filename: item.filename })
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = filename
+                        document.body.appendChild(a)
+                        a.click()
+                        a.remove()
+                        URL.revokeObjectURL(url)
+                        setStatus('Download started')
+                      } catch (e) {
+                        setStatus('Download error: ' + e.message)
+                      }
+                    }}>Download</button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
 
         {!sessionEstablished && (
           <div className="small" style={{ marginTop: 6 }}>
@@ -409,17 +550,48 @@ export default function ConversationPage() {
         )}
 
         <div style={{ marginTop: 12 }}>
-          {messages.map(m => (
-            <div key={m.id} style={{ borderBottom: '1px solid #eee', padding: 8 }}>
-              <strong>{m.sender}</strong> <small>{m.timestamp}</small>
-              <div>{m.text}</div>
-            </div>
-          ))}
+          {messages.map(m => {
+            const isMe = m.sender === user.username
+            return (
+              <div key={m.id || `${m.sender}-${m.timestamp}`} style={{ display: 'flex', justifyContent: isMe ? 'flex-end' : 'flex-start', marginBottom: 8, gap: 6, alignItems: 'center' }}>
+                {!isMe && (
+                  <img src={chatIcon} alt="incoming" className="icon" style={{ width: 16, height: 16, opacity: 0.7 }} />
+                )}
+                <div style={{
+                  maxWidth: '70%',
+                  background: isMe ? '#DCF8C6' : '#ffffff',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 12,
+                  padding: 10
+                }}>
+                  <div className="small" style={{ opacity: 0.7 }}>{isMe ? 'You' : m.sender}</div>
+                  <div>{m.text}</div>
+                  <div className="small" style={{ textAlign: 'right', marginTop: 4 }}>{m.timestamp}</div>
+                </div>
+                {isMe && (
+                  <img src={commentIcon} alt="outgoing" className="icon" style={{ width: 16, height: 16, opacity: 0.7 }} />
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
 
-      <div className="card">
-        <pre style={{ whiteSpace: 'pre-wrap' }}>{status}</pre>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+        <div className="card">
+          <pre style={{ whiteSpace: 'pre-wrap' }}>{status}</pre>
+        </div>
+        <div className="card">
+          <h4>Activity</h4>
+          <div className="small" style={{ maxHeight: 240, overflowY: 'auto' }}>
+            {statusEvents.slice().reverse().map(evt => (
+              <div key={evt.ts} style={{ borderBottom: '1px solid #eee', padding: 6 }}>
+                <div>{evt.text}</div>
+                <div style={{ opacity: 0.6 }}>{new Date(evt.ts).toLocaleTimeString()}</div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </MainLayout>
   )

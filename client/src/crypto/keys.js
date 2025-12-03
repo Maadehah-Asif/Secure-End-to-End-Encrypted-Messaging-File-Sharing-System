@@ -7,7 +7,14 @@ export const textEncoder = new TextEncoder()
 export const textDecoder = new TextDecoder()
 
 export function bufToBase64(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+  const u8 = new Uint8Array(buf)
+  const CHUNK = 0x8000
+  let binary = ''
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    const sub = u8.subarray(i, Math.min(i + CHUNK, u8.length))
+    binary += String.fromCharCode.apply(null, sub)
+  }
+  return btoa(binary)
 }
 export function base64ToBuf(b64) {
   const str = atob(b64)
@@ -16,13 +23,13 @@ export function base64ToBuf(b64) {
   return arr.buffer
 }
 
-export async function generateKeyPairs() {
-  // ECDH for shared-secret derivation
-  const ecdh = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits'])
-  // ECDSA for signing
+// Identity keys: Only ECDSA for long-term identity (sign/verify)
+export async function generateIdentityEcdsa() {
   const ecdsa = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
-  return { ecdh, ecdsa }
+  return { ecdsa }
 }
+
+// Ephemeral session keys: ECDH is generated per-session elsewhere (not persisted here)
 
 export async function exportPublicJWK(key) {
   const jwk = await crypto.subtle.exportKey('jwk', key)

@@ -62,14 +62,18 @@ export default function LoginPage() {
     const data = await res.json().catch(() => ({ error: 'Server error' }))
     if (res.ok) {
       login(data.token, data.user)
-      nav('/dashboard')
+      // After login, show the landing page first
+      nav('/')
     } else {
       setErrors({ server: data.error || 'Login failed' })
     }
   }
 
   return (
-    <AuthLayout title="Login" image={imageSrc || illustration || defaultPlaceholder()}>
+    <AuthLayout title="" image={imageSrc || illustration || defaultPlaceholder()}>
+      <h1 className="app-title">CipherLink</h1>
+      <div className="app-tagline">Links people securely, powered by cryptography</div>
+      <h2 className="auth-section-title" style={{ marginTop: 12 }}>Login</h2>
       <form onSubmit={submit} className="auth-form">
         <div className="form-row">
           <label>Username or Email</label>

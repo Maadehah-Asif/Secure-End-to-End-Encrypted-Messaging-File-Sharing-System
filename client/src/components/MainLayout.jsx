@@ -1,8 +1,10 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext.jsx'
 import '../styles/forms.css'
+import homeIcon from '../assets/icons/home.png'
+import contactsIcon from '../assets/icons/contacts.png'
 
-export default function MainLayout({ children }) {
+export default function MainLayout({ children, fullWidth = false }) {
   const { user, logout } = useAuth()
   const nav = useNavigate()
 
@@ -14,9 +16,10 @@ export default function MainLayout({ children }) {
   return (
     <div>
       <nav className="top-nav">
-        <div className="nav-left">
-          <Link to="/">Home</Link>
-          <Link to="/dashboard">Dashboard</Link>
+        <div className="nav-left"><Link to="/" className="icon-link"><span className="nav-title">CipherLink</span></Link></div>
+        <div className="nav-icons">
+          <Link to="/dashboard" title="Home" className="icon-link"><img className="icon" src={homeIcon} alt="home" /></Link>
+          <Link to="/contacts" title="Contacts" className="icon-link"><img className="icon" src={contactsIcon} alt="contacts" /></Link>
         </div>
         <div className="nav-right">
           {user ? (
@@ -30,7 +33,14 @@ export default function MainLayout({ children }) {
         </div>
       </nav>
 
-      <main className="app-container">
+      <main
+        className="app-container"
+        style={{
+          maxWidth: fullWidth ? '100%' : '1200px',
+          margin: fullWidth ? 0 : '0 auto',
+          padding: fullWidth ? 0 : '16px'
+        }}
+      >
         {children}
       </main>
     </div>

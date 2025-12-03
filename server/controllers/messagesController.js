@@ -2,6 +2,7 @@ import Message from '../models/Message.js'
 import User from '../models/User.js'
 import Log from '../models/Log.js'
 import SessionState from '../models/SessionState.js'
+import { writeLog } from '../utils/logger.js'
 
 function log(event, details) {
   console.log(`[messages] ${event}`, details);
@@ -31,6 +32,7 @@ export async function postMessage(req, res) {
       // log replay attempt
       log('replay_detected', { sessionId, sender: user.username, counter, highestSeen: session.highestCounter })
       await Log.create({ event: 'replay_detected', details: { sessionId, sender: user.username, counter, highestSeen: session.highestCounter } }).catch(()=>{})
+      writeLog('detected_replay_attack', { type: 'message', sessionId, sender: user.username, counter, highestSeen: session.highestCounter })
       return res.status(409).json({ error: 'Replay detected' })
     }
 
@@ -43,6 +45,7 @@ export async function postMessage(req, res) {
     await session.save()
 
     log('message_stored', { sessionId, sender: user.username, counter })
+    writeLog('server_side_metadata_access', { byUserId: uid, route: 'messages/post', sessionId })
     res.json({ ok: true })
   } catch (err) {
     log('post_error', { message: err.message })
@@ -69,6 +72,7 @@ export async function getMessages(req, res) {
     // Return all messages for the session
     const msgs = await Message.find({ sessionId }).sort({ createdAt: 1 }).select('-__v')
     log('messages_fetch', { sessionId, by: uid, count: msgs.length })
+    writeLog('server_side_metadata_access', { byUserId: uid, route: 'messages/get', sessionId, count: msgs.length })
     res.json({ messages: msgs })
   } catch (err) {
     log('get_error', { message: err.message })

@@ -9,14 +9,14 @@ export async function upsertPublicKeys(req, res) {
   try {
     const uid = req.user?.uid
     if (!uid) return res.status(401).json({ error: 'Unauthorized' })
-    const { ecdh, ecdsa } = req.body
-    if (!ecdh || !ecdsa) return res.status(400).json({ error: 'Missing key material' })
+    const { ecdsa, ecdh } = req.body
+    if (!ecdsa) return res.status(400).json({ error: 'Missing ECDSA public key' })
     const user = await User.findById(uid)
     if (!user) return res.status(404).json({ error: 'User not found' })
 
     const doc = await PublicKey.findOneAndUpdate(
       { userId: uid },
-      { userId: uid, username: user.username, public: { ecdh, ecdsa } },
+      { userId: uid, username: user.username, public: ecdh ? { ecdh, ecdsa } : { ecdsa } },
       { upsert: true, new: true }
     )
     log('upload', { userId: uid, username: user.username })

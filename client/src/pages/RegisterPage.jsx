@@ -94,7 +94,10 @@ export default function RegisterPage() {
   }
 
   return (
-    <AuthLayout title="Create account" image={imageSrc || illustration || defaultPlaceholder()}>
+    <AuthLayout title="" image={imageSrc || illustration || defaultPlaceholder()}>
+      <h1 className="app-title">CipherLink</h1>
+      <div className="app-tagline">Links people securely, powered by cryptography</div>
+      <h2 className="auth-section-title" style={{ marginTop: 12 }}>Create account</h2>
       <form onSubmit={submit} className="auth-form">
         <div className="form-row">
           <label>Full name</label>

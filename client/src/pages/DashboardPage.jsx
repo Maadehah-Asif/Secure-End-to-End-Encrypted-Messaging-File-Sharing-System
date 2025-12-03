@@ -31,11 +31,11 @@ export default function DashboardPage() {
 
   return (
     <MainLayout>
+      <button onClick={() => nav('/')} className="back-button" style={{ marginBottom: 8 }}>
+        ← Back
+      </button>
       <div className="card">
         <h2>Dashboard</h2>
-        <div style={{ marginTop: 8 }}>
-          <Link to="/contacts"><button className="btn" style={{ background:'#47727F' }}>Contacts</button></Link>
-        </div>
         {me && (
           <div>
             <p className="small">Welcome, <strong>{me.fullName}</strong> ({me.username})</p>
@@ -45,13 +45,10 @@ export default function DashboardPage() {
       </div>
 
       <div className="card">
-        <h3>Secure Messaging</h3>
-        <div className="form-row">
-          <label>Target username</label>
-          <input value={targetUser} onChange={e => setTargetUser(e.target.value)} />
-        </div>
+        <h3>Step 1 — Generate and unlock your keys</h3>
+        <p className="small">After your keys are ready, proceed to Contacts to start a secure chat.</p>
         <div style={{ marginTop: 8 }}>
-          <button className="btn" onClick={openConversation}>Open Conversation</button>
+          <Link to="/contacts"><button className="btn">Proceed to Contacts</button></Link>
         </div>
       </div>
 

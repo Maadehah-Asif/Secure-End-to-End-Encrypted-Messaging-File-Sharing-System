@@ -9,8 +9,8 @@ export default function AuthLayout({ title, image, children }) {
       </div>
       <div className="auth-right">
         <div className="auth-right-inner">
-          <h2>{title}</h2>
           {children}
+          {title ? (<h2 style={{ marginTop: 12 }}>{title}</h2>) : null}
         </div>
       </div>
     </div>

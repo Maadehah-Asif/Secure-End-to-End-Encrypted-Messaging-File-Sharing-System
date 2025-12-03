@@ -1,6 +1,7 @@
 import argon2 from 'argon2';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { writeLog } from '../utils/logger.js'
 
 function log(event, details) {
   console.log(`[auth] ${event}`, details);
@@ -91,8 +92,10 @@ export function requireAuth(req, res, next) {
     }
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     req.user = { uid: payload.uid, username: payload.username };
+    writeLog('authentication_attempt', { ok: true, username: payload.username, ip: req.ip });
     next();
   } catch (err) {
+    writeLog('authentication_attempt', { ok: false, reason: err.message, ip: req.ip });
     return res.status(401).json({ error: 'Unauthorized' });
   }
 }

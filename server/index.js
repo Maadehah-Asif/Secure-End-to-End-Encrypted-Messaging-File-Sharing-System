@@ -17,7 +17,8 @@ const PORT = process.env.PORT || 4000;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 
 app.use(cors({ origin: [FRONTEND_ORIGIN, 'http://localhost:5173'], credentials: true }));
-app.use(express.json());
+// Increase JSON body size to accommodate encrypted file chunks
+app.use(express.json({ limit: '5mb' }));
 
 connectDB();
 

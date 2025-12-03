@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react'
-import { generateKeyPairs, exportPublicJWK, exportPrivateJWK, wrapPrivateJWK, getWrappedKey, unwrapPrivateJWK, saveWrappedKeys, loadWrappedKeys } from '../crypto/keys.js'
+import { generateIdentityEcdsa, exportPublicJWK, exportPrivateJWK, wrapPrivateJWK, unwrapPrivateJWK, saveWrappedKeys, loadWrappedKeys } from '../crypto/keys.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import '../styles/forms.css'
+import keyIcon from '../assets/icons/vpn_key.png'
 
 export default function KeyManager() {
   const { user, token } = useAuth()
   const userId = user?.id
   const [status, setStatus] = useState('')
-  const [pubEcdh, setPubEcdh] = useState(null)
   const [pubEcdsa, setPubEcdsa] = useState(null)
   const [tempPrivate, setTempPrivate] = useState(null)
   const [hasStored, setHasStored] = useState(false)
@@ -23,7 +23,6 @@ export default function KeyManager() {
         if (mounted) {
           setHasStored(!!existing)
           if (existing && existing.public) {
-            setPubEcdh(existing.public.ecdh)
             setPubEcdsa(existing.public.ecdsa)
           }
         }
@@ -42,7 +41,6 @@ export default function KeyManager() {
       setTempPrivate(null)
       setPassphrase('')
       setHasStored(false)
-      setPubEcdh(null)
       setPubEcdsa(null)
       setStatus('')
     }
@@ -55,20 +53,16 @@ export default function KeyManager() {
       return setStatus('Identity keys already exist for this account. Use Unlock or Regenerate (dangerous).')
     }
     if (!passphrase) return setStatus('Enter a local passphrase to protect your private keys before generating')
-    setStatus('Generating identity keys...')
+    setStatus('Generating identity keys (ECDSA only)...')
     try {
-      const { ecdh, ecdsa } = await generateKeyPairs()
-      const pubE = await exportPublicJWK(ecdh.publicKey)
+      const { ecdsa } = await generateIdentityEcdsa()
       const pubS = await exportPublicJWK(ecdsa.publicKey)
-      setPubEcdh(pubE)
       setPubEcdsa(pubS)
       // export private jwks
-      const ePriv = await exportPrivateJWK(ecdh.privateKey)
       const sPriv = await exportPrivateJWK(ecdsa.privateKey)
       // wrap immediately using provided passphrase
-      const wrappedEcdh = await wrapPrivateJWK(ePriv, passphrase)
       const wrappedEcdsa = await wrapPrivateJWK(sPriv, passphrase)
-      const saved = { public: { ecdh: pubE, ecdsa: pubS }, wrapped: { ecdh: wrappedEcdh, ecdsa: wrappedEcdsa } }
+      const saved = { public: { ecdsa: pubS }, wrapped: { ecdsa: wrappedEcdsa } }
       await saveWrappedKeys(userId, saved)
       setTempPrivate(null)
       setHasStored(true)
@@ -79,7 +73,7 @@ export default function KeyManager() {
         const res = await fetch(`${apiUrl}/api/keys`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ ecdh: pubE, ecdsa: pubS })
+          body: JSON.stringify({ ecdsa: pubS })
         })
         if (res.ok) {
           setStatus(s => s + ' Public keys uploaded to server.')
@@ -100,10 +94,9 @@ export default function KeyManager() {
     setStatus('Unwrapping...')
     try {
       const stored = await loadWrappedKeys(userId)
-      if (!stored || !stored.wrapped) throw new Error('No wrapped keys stored for this account')
-      const jwkE = await unwrapPrivateJWK(stored.wrapped.ecdh, pass)
+      if (!stored || !stored.wrapped || !stored.wrapped.ecdsa) throw new Error('No wrapped ECDSA key stored for this account')
       const jwkS = await unwrapPrivateJWK(stored.wrapped.ecdsa, pass)
-      setTempPrivate({ ecdhPrivate: jwkE, ecdsaPrivate: jwkS })
+      setTempPrivate({ ecdsaPrivate: jwkS })
       setStatus('Unwrap success. Private keys loaded in memory.')
     } catch (err) {
       setStatus('Error unwrapping keys: ' + err.message)
@@ -117,32 +110,31 @@ export default function KeyManager() {
 
   return (
     <div className="card">
-      <h3>Key Manager</h3>
+      <button onClick={() => window.history.back()} className="back-button" style={{ marginBottom: 8 }}>
+        ← Back
+      </button>
+      <h3><img src={keyIcon} className="icon-sm" alt="keys" />Key Manager</h3>
       <p className="small">{status}</p>
 
       <div className="form-row">
-        <label>Identity keys</label>
+        <label><img src={keyIcon} className="icon-sm" alt="keys" />Identity keys</label>
         <div className="small">Long-term keys used to identify you. Generated once and stored locally.</div>
         {!hasStored && (
           <div style={{ marginTop: 8 }}>
-            <button className="btn" onClick={makeKeys}>Generate Identity Keys</button>
+            <button className="btn" onClick={makeKeys}><img src={keyIcon} className="icon-sm" alt="keys" />Generate Identity Keys</button>
           </div>
         )}
         {hasStored && (
           <div style={{ marginTop: 8 }}>
             <div className="small">Identity keys are already stored for this account.</div>
-            <div style={{ marginTop: 8 }}>
-              <button className="btn" onClick={() => loadPrivate(passphrase)}>Unlock Keys</button>
-              <button className="btn" onClick={() => setStatus('Regenerate not implemented; use Revoke workflow')} style={{ marginLeft: 8 }}>Regenerate</button>
-            </div>
           </div>
         )}
       </div>
 
-      {pubEcdh && (
+      {pubEcdsa && (
         <div className="form-row">
-          <label>Public Keys</label>
-          <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify({ ecdh: pubEcdh, ecdsa: pubEcdsa }, null, 2)}</pre>
+          <label><img src={keyIcon} className="icon-sm" alt="keys" />Public Keys</label>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify({ ecdsa: pubEcdsa }, null, 2)}</pre>
         </div>
       )}
 
@@ -151,12 +143,12 @@ export default function KeyManager() {
         <input type="password" value={passphrase} onChange={e=>setPassphrase(e.target.value)} />
         <div style={{ marginTop: 6 }}>
           {tempPrivate ? (
-            <button className="btn" onClick={lockKeys}>Lock Keys</button>
+            <button className="btn" onClick={lockKeys}><img src={keyIcon} className="icon-sm" alt="keys" />Lock Keys</button>
           ) : (
             hasStored ? (
-              <button className="btn" onClick={() => loadPrivate(passphrase)}>Unlock Keys</button>
+              <button className="btn" onClick={() => loadPrivate(passphrase)}><img src={keyIcon} className="icon-sm" alt="keys" />Unlock Keys</button>
             ) : (
-              <button className="btn" onClick={makeKeys}>Generate Identity Keys</button>
+              <button className="btn" onClick={makeKeys}><img src={keyIcon} className="icon-sm" alt="keys" />Generate Identity Keys</button>
             )
           )}
         </div>

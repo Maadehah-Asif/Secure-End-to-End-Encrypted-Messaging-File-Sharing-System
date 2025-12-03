@@ -45,6 +45,9 @@ export default function ContactsPage() {
 
   return (
     <MainLayout>
+      <button onClick={() => navigate('/')} className="back-button" style={{ marginBottom: 8 }}>
+        ← Back
+      </button>
       <div className="card">
         <h2>Contacts</h2>
         <div className="form-row">
