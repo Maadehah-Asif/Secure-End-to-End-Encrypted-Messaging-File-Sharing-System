@@ -132,13 +132,5 @@ cd "C:\Projects\2)Work_Projects\Info-Sec Project\Information-Security-Project\cl
 ```
 - **Handshake not confirming:** Check system clock synchronization and ensure both clients have valid identity keys unlocked with the correct passphrase.
 
-## MITM Demo Notes (optional)
-- **Insecure variant comparison:** Demonstrate how signatures and deterministic salt/AAD prevent tampering and replay compared to a naive variant.
-- **Procedure:** Disable signature verification and deterministic salt in a test branch; observe successful MITM injection or decryption failures.
 
-## Contribution
-- **Workflow:** Create feature branches; open PRs with clear descriptions; include tests or manual verification steps.
-- **Coding style:** Keep changes minimal and focused; maintain consistency with existing patterns.
 
-## License
-- This project is intended for educational use within an information security course context. Redistribution terms should follow institutional guidelines or be added by maintainers as needed.
