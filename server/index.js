@@ -9,6 +9,7 @@ import logsRoutes from './routes/logs.js';
 import messagesRoutes from './routes/messages.js';
 import filesRoutes from './routes/files.js';
 import usersRoutes from './routes/users.js';
+import { ensureUpdatedIndexes } from './utils/indexes.js';
 
 dotenv.config();
 
@@ -21,6 +22,7 @@ app.use(cors({ origin: [FRONTEND_ORIGIN, 'http://localhost:5173'], credentials: 
 app.use(express.json({ limit: '5mb' }));
 
 connectDB();
+ensureUpdatedIndexes().catch(()=>{});
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.use('/api/auth', authRoutes);

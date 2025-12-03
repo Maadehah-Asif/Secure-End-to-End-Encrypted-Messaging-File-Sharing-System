@@ -1,4 +1,5 @@
 import * as cs from './cryptoSession.js'
+import { GROUP_TAG, HKDF_INFO_SESSION, AAD_HANDSHAKE_PREFIX } from '../constants/protocol.js'
 import { loadWrappedKeys, unwrapPrivateJWK, wrapPrivateJWK, storeWrappedSession } from '../crypto/keys.js'
 
 const usedNoncesKey = 'isp:seen_nonces'
@@ -40,11 +41,13 @@ export async function startSession({ apiUrl, token, myUserId, myUsername, passph
   const timestamp = new Date().toISOString()
 
   // build data to sign
-  const data = cs.buildSignedData(nonceB64, timestamp, ephPub)
-  const sig = await cs.signECDSA(myEcdsaKey, data)
+  // Build signature input per group-unique format
+  const ephPubB64 = btoa(JSON.stringify(ephPub))
+  const toSignInitBuf = cs.buildInitSignatureInput({ initId: 'init-pending', from: myUsername, to: targetUsername, ephemeralPubB64: ephPubB64, nonceB64, timestamp })
+  const sig = await cs.signECDSA(myEcdsaKey, toSignInitBuf)
 
   // send SESSION_INIT to server
-  const payload = { from: myUsername, ephemeral: ephPub, nonce: nonceB64, timestamp, signature: sig }
+  const payload = { from: myUsername, to: targetUsername, ephemeral: ephPub, nonce: nonceB64, timestamp, signature: sig, group: GROUP_TAG }
   const res = await fetch(`${apiUrl}/api/sessions/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -77,8 +80,9 @@ export async function startSession({ apiUrl, token, myUserId, myUsername, passph
 
   // verify reply signature
   const replyPayload = reply.payload
-  const replyData = cs.buildSignedData(replyPayload.nonce, replyPayload.timestamp, replyPayload.ephemeral)
-  const valid = await cs.verifyECDSA(senderEcdsaKey, replyData, replyPayload.signature)
+  const replyEphB64 = btoa(JSON.stringify(replyPayload.ephemeral))
+  const replyInputBuf = cs.buildReplySignatureInput({ inReplyTo: initId, from: sender, ephemeralPubB64: replyEphB64, nonceB64: replyPayload.nonce, timestamp: replyPayload.timestamp })
+  const valid = await cs.verifyECDSA(senderEcdsaKey, replyInputBuf, replyPayload.signature)
   if (!valid) {
     // log invalid signature
     await fetch(`${apiUrl}/api/logs`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ event: 'invalid_reply_signature', details: { from: sender, to: myUsername } }) })
@@ -105,8 +109,9 @@ export async function startSession({ apiUrl, token, myUserId, myUsername, passph
   // Use canonical session id from reply.payload.inReplyTo if present, otherwise fall back to our initId
   const canonicalInitId = (replyPayload && replyPayload.inReplyTo) ? replyPayload.inReplyTo : initId
   // Deterministic HKDF salt from both nonces and canonical init id
-  const saltData = new TextEncoder().encode(`${nonceB64}|${replyPayload.nonce}|${canonicalInitId}`)
-  const aesKey = await cs.hkdfDeriveKey(shared, saltData.buffer, 'isp-session-key-v1')
+  const saltText = `${nonceB64}|${replyPayload.nonce}|${canonicalInitId}|${GROUP_TAG}`
+  const saltHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(saltText))
+  const aesKey = await cs.hkdfDeriveKey(shared, saltHash, HKDF_INFO_SESSION)
 
   // wrap and store session key
   const wrapped = await cs.wrapSessionKey(aesKey, passphrase)
@@ -114,6 +119,25 @@ export async function startSession({ apiUrl, token, myUserId, myUsername, passph
   await storeWrappedSession(canonicalInitId, { wrapped, meta: { participants: [myUsername, targetUsername], lastUsedAt: Date.now() } })
   // clear initiated flag
   try { localStorage.removeItem(`isp:initiated:${targetUsername}`) } catch (e) {}
+
+  // Send KEY_CONFIRM encrypted with the derived session key
+  try {
+    const confirmTs = new Date().toISOString()
+    const confirmText = `cl-key-confirm|v2022|${GROUP_TAG}|${canonicalInitId}|${nonceB64}|${replyPayload.nonce}|${timestamp}|${replyPayload.timestamp}`
+    const aadString = `${AAD_HANDSHAKE_PREFIX}|confirm|${canonicalInitId}|${myUsername}|${confirmTs}`
+    const { ciphertext, ivB64 } = await cs.encryptWithAesGcm(aesKey, confirmText, aadString)
+    const confRes = await fetch(`${apiUrl}/api/sessions/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ toUsername: sender, payload: { sessionId: canonicalInitId, ciphertext, iv: ivB64, aad: aadString, timestamp: confirmTs, group: GROUP_TAG } })
+    })
+    if (!confRes.ok) {
+      // non-fatal; proceed but log server-side
+      await fetch(`${apiUrl}/api/logs`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ event: 'key_confirm_post_failed', details: { sessionId: canonicalInitId } }) })
+    }
+  } catch (e) {
+    // non-fatal; proceed
+  }
 
   return { sessionId: canonicalInitId }
 }
@@ -252,8 +276,10 @@ export async function handleIncomingInit(apiUrl, token, message, myUserId, myUse
   if (!pubRes.ok) throw new Error('Failed to fetch sender public keys')
   const pubData = await pubRes.json()
   const senderEcdsaKey = await cs.importPublicECDSA(pubData.public.ecdsa)
-  const dataToVerify = cs.buildSignedData(payload.nonce, payload.timestamp, payload.ephemeral)
-  const ok = await cs.verifyECDSA(senderEcdsaKey, dataToVerify, payload.signature)
+  const initEphB64 = btoa(JSON.stringify(payload.ephemeral))
+  // Initiator signs before knowing server id; use canonical placeholder 'init-pending' for verification
+  const initInputBuf = cs.buildInitSignatureInput({ initId: 'init-pending', from: sender, to: myUsername, ephemeralPubB64: initEphB64, nonceB64: payload.nonce, timestamp: payload.timestamp })
+  const ok = await cs.verifyECDSA(senderEcdsaKey, initInputBuf, payload.signature)
   if (!ok) {
     // log and reject
     await fetch(`${apiUrl}/api/logs`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ event: 'invalid_init_signature', details: { from: sender, to: myUsername } }) })
@@ -282,8 +308,9 @@ export async function handleIncomingInit(apiUrl, token, message, myUserId, myUse
 
   // Deterministic HKDF salt from initiator nonce, responder nonce, and canonical init id (init message id)
   const initId = message._id
-  const saltData = new TextEncoder().encode(`${payload.nonce}|${nonceB64}|${initId}`)
-  const aesKey = await cs.hkdfDeriveKey(shared, saltData.buffer, 'isp-session-key-v1')
+  const saltText = `${payload.nonce}|${nonceB64}|${initId}|${GROUP_TAG}`
+  const saltHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(saltText))
+  const aesKey = await cs.hkdfDeriveKey(shared, saltHash, HKDF_INFO_SESSION)
 
   // unwrap our identity private key to sign reply
   const stored = await loadWrappedKeys(myUserId)
@@ -291,10 +318,11 @@ export async function handleIncomingInit(apiUrl, token, message, myUserId, myUse
   const myEcdsaJwk = await unwrapPrivateJWK(stored.wrapped.ecdsa, passphrase)
   const myEcdsaKey = await cs.importPrivateECDSA(myEcdsaJwk)
 
-  const signData = cs.buildSignedData(nonceB64, timestampB, ephPub)
-  const sig = await cs.signECDSA(myEcdsaKey, signData)
+  const replyEphB64 = btoa(JSON.stringify(ephPub))
+  const replySignBuf = cs.buildReplySignatureInput({ inReplyTo: initId, from: myUsername, ephemeralPubB64: replyEphB64, nonceB64, timestamp: timestampB })
+  const sig = await cs.signECDSA(myEcdsaKey, replySignBuf)
 
-  const replyPayload = { ephemeral: ephPub, nonce: nonceB64, timestamp: timestampB, signature: sig, inReplyTo: message._id }
+  const replyPayload = { ephemeral: ephPub, nonce: nonceB64, timestamp: timestampB, signature: sig, inReplyTo: message._id, group: GROUP_TAG }
   // send reply
   const resp = await fetch(`${apiUrl}/api/sessions/reply`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ toUsername: sender, payload: replyPayload }) })
   if (!resp.ok) throw new Error('Failed to send reply')
@@ -305,5 +333,38 @@ export async function handleIncomingInit(apiUrl, token, message, myUserId, myUse
   const wrapped = await cs.wrapSessionKey(aesKey, passphrase)
   await storeWrappedSession(initId, { wrapped, meta: { participants: [myUsername, sender], lastUsedAt: Date.now() } })
 
+  // Wait briefly for KEY_CONFIRM message from initiator and verify
+  try {
+    const confirm = await pollForKeyConfirm(apiUrl, token, initId)
+    if (confirm && confirm.payload) {
+      const aadString = confirm.payload.aad
+      const pt = await cs.decryptWithAesGcm(aesKey, confirm.payload.ciphertext, confirm.payload.iv, aadString)
+      // minimal sanity check: payload must match our expected session/nonces
+      if (!(typeof pt === 'string' && pt.includes(initId) && pt.includes(payload.nonce) && pt.includes(nonceB64))) {
+        await fetch(`${apiUrl}/api/logs`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ event: 'key_confirm_invalid_plaintext', details: { sessionId: initId } }) })
+      }
+      // mark consumed
+      await fetch(`${apiUrl}/api/sessions/consume/${confirm._id}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    }
+  } catch (e) {
+    // non-fatal; proceed
+  }
+
   return { sessionId: initId }
+}
+
+async function pollForKeyConfirm(apiUrl, token, sessionId, attempts = 15) {
+  for (let i = 0; i < attempts; i++) {
+    const res = await fetch(`${apiUrl}/api/sessions/inbox`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) throw new Error('Inbox fetch failed')
+    const data = await res.json()
+    const msgs = data.messages || []
+    for (const m of msgs) {
+      if (m.type === 'KEY_CONFIRM' && m.payload && m.payload.sessionId === sessionId) {
+        return m
+      }
+    }
+    await new Promise(r => setTimeout(r, 1000))
+  }
+  return null
 }

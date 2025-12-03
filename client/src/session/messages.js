@@ -1,5 +1,6 @@
 import { base64ToBuf, bufToBase64, updateSessionLastUsed } from '../crypto/keys.js'
 import { loadWrappedSession } from '../crypto/keys.js'
+import { AAD_MSG_PREFIX } from '../constants/protocol.js'
 import { unwrapSessionKey } from './cryptoSession.js'
 
 const textEncoder = new TextEncoder()
@@ -27,19 +28,35 @@ export async function sendMessage({ apiUrl, token, sessionId, passphrase, plaint
   const counter = loadCounter(sessionId) + 1
   const timestamp = new Date().toISOString()
 
-  // AAD = counter|timestamp|senderUsername
-  const aad = textEncoder.encode(`${counter}|${timestamp}|${senderUsername}`)
+  // AAD per group-unique format
+  const aadString = `${AAD_MSG_PREFIX}|${sessionId}|${senderUsername}|${counter}|${timestamp}`
+  const aad = textEncoder.encode(aadString)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const pt = textEncoder.encode(plaintext)
   const ctBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, pt)
   const ciphertext = bufToBase64(ctBuf)
   const ivB64 = bufToBase64(iv.buffer)
 
-  // send to server
+  // send to server with group-unique envelope fields (server stores a subset)
   let res = await fetch(`${apiUrl}/api/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sessionId, ciphertext, iv: ivB64, counter, timestamp })
+    body: JSON.stringify({
+      // server-required fields
+      sessionId,
+      ciphertext,
+      iv: ivB64,
+      counter,
+      timestamp,
+      // envelope (for protocol clarity)
+      proto: 'cl-msg-v2022',
+      group: 'maadehah-hania-rubban-se-2022',
+      session: sessionId,
+      from: senderUsername,
+      ctr: counter,
+      ts: timestamp,
+      aad: aadString
+    })
   })
   if (!res.ok) {
     // if replay detected (409), try to sync counter and retry once
@@ -47,7 +64,8 @@ export async function sendMessage({ apiUrl, token, sessionId, passphrase, plaint
       const synced = await syncCounterFromServer({ apiUrl, token, sessionId })
       if (synced) {
         const newCounter = loadCounter(sessionId) + 1
-        const newAad = textEncoder.encode(`${newCounter}|${timestamp}|${senderUsername}`)
+        const newAadString = `${AAD_MSG_PREFIX}|${sessionId}|${senderUsername}|${newCounter}|${timestamp}`
+        const newAad = textEncoder.encode(newAadString)
         const newIv = crypto.getRandomValues(new Uint8Array(12))
         const newCtBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: newIv, additionalData: newAad }, aesKey, pt)
         const newCiphertext = bufToBase64(newCtBuf)
@@ -55,7 +73,20 @@ export async function sendMessage({ apiUrl, token, sessionId, passphrase, plaint
         res = await fetch(`${apiUrl}/api/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ sessionId, ciphertext: newCiphertext, iv: newIvB64, counter: newCounter, timestamp })
+          body: JSON.stringify({
+            sessionId,
+            ciphertext: newCiphertext,
+            iv: newIvB64,
+            counter: newCounter,
+            timestamp,
+            proto: 'cl-msg-v2022',
+            group: 'maadehah-hania-rubban-se-2022',
+            session: sessionId,
+            from: senderUsername,
+            ctr: newCounter,
+            ts: timestamp,
+            aad: newAadString
+          })
         })
       }
     }
@@ -93,7 +124,7 @@ export async function fetchAndDecrypt({ apiUrl, token, sessionId, passphrase, ma
         // skip stale
         continue
       }
-      const aad = textEncoder.encode(`${m.counter}|${m.timestamp}|${m.senderUsername}`)
+      const aad = textEncoder.encode(`${AAD_MSG_PREFIX}|${sessionId}|${m.senderUsername}|${m.counter}|${m.timestamp}`)
       const ivBuf = base64ToBuf(m.iv)
       const ctBuf = base64ToBuf(m.ciphertext)
       const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf, additionalData: aad }, aesKey, ctBuf)

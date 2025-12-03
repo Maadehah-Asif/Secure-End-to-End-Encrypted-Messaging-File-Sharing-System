@@ -6,6 +6,7 @@ const sessionStateSchema = new mongoose.Schema({
   responderUsername: { type: String, required: false },
   highestCounter: { type: Number, default: 0 },
   highestFileCounter: { type: Number, default: 0 },
+  confirmedAt: { type: Date, required: false },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 })

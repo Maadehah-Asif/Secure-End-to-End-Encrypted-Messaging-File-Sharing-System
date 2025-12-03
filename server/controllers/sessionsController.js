@@ -74,6 +74,40 @@ export async function postSessionReply(req, res) {
   }
 }
 
+export async function postSessionConfirm(req, res) {
+  try {
+    const from = req.user?.uid
+    if (!from) return res.status(401).json({ error: 'Unauthorized' })
+    const { toUsername, payload } = req.body
+    if (!toUsername || !payload) return res.status(400).json({ error: 'Missing fields' })
+    const toUser = await User.findOne({ username: toUsername })
+    if (!toUser) return res.status(404).json({ error: 'Recipient not found' })
+
+    const msg = await SessionMessage.create({ fromUserId: from, toUserId: toUser._id, type: 'KEY_CONFIRM', payload })
+    // Mark session as confirmed if payload carries sessionId
+    try {
+      const sid = payload && payload.sessionId
+      if (sid) {
+        const sess = await SessionState.findOne({ sessionId: sid.toString() })
+        if (sess) {
+          sess.updatedAt = new Date()
+          // store confirmation time; keep schema flexible by using dynamic assignment
+          if (!sess.confirmedAt) sess.confirmedAt = new Date()
+          await sess.save()
+        }
+      }
+    } catch (e) {
+      Log.create({ event: 'session_state_confirm_error', details: { message: e.message, payloadSessionId: payload?.sessionId } }).catch(()=>{})
+    }
+
+    writeLog('key_exchange_attempt', { type: 'KEY_CONFIRM', fromUserId: from, toUserId: toUser._id })
+    res.json({ ok: true, id: msg._id })
+  } catch (err) {
+    log('confirm_error', { message: err.message })
+    res.status(500).json({ error: 'Server error' })
+  }
+}
+
 export async function fetchMessages(req, res) {
   try {
     const uid = req.user?.uid

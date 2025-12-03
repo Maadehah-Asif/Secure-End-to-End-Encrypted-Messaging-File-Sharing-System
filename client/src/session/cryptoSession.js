@@ -1,5 +1,6 @@
 // Client-side session crypto helpers: ephemeral key generation, sign/verify, ECDH derive, HKDF derive, wrap session key
 import { textEncoder, textDecoder, bufToBase64, base64ToBuf } from '../crypto/keys.js'
+import { GROUP_TAG, HKDF_INFO_SESSION, HKDF_INFO_HANDSHAKE, AAD_HANDSHAKE_PREFIX } from '../constants/protocol.js'
 
 export async function generateEphemeral() {
   const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits'])
@@ -77,9 +78,29 @@ export async function unwrapSessionKey(wrapped, passphrase) {
 }
 
 // helper to assemble signed payload
-export function buildSignedData(nonceB64, timestampISO, pubJwk) {
-  // canonical ordering: nonce || timestamp || JSON.stringify(pubJwk)
-  const pubStr = JSON.stringify(pubJwk)
-  const parts = [nonceB64, timestampISO, pubStr]
-  return textEncoder.encode(parts.join('|'))
+export function buildInitSignatureInput({ initId, from, to, ephemeralPubB64, nonceB64, timestamp }) {
+  const s = `cl-init|v2022|${GROUP_TAG}|${initId}|${from}|${to}|${ephemeralPubB64}|${nonceB64}|${timestamp}`
+  return textEncoder.encode(s)
+}
+
+export function buildReplySignatureInput({ inReplyTo, from, ephemeralPubB64, nonceB64, timestamp }) {
+  const s = `cl-reply|v2022|${GROUP_TAG}|${inReplyTo}|${from}|${ephemeralPubB64}|${nonceB64}|${timestamp}`
+  return textEncoder.encode(s)
+}
+
+// AES-GCM small helper for handshake confirmations
+export async function encryptWithAesGcm(aesKey, plaintext, aadString) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const pt = textEncoder.encode(plaintext)
+  const aad = textEncoder.encode(aadString)
+  const ctBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, pt)
+  return { ciphertext: bufToBase64(ctBuf), ivB64: bufToBase64(iv.buffer) }
+}
+
+export async function decryptWithAesGcm(aesKey, ciphertextB64, ivB64, aadString) {
+  const iv = base64ToBuf(ivB64)
+  const ct = base64ToBuf(ciphertextB64)
+  const aad = textEncoder.encode(aadString)
+  const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, ct)
+  return textDecoder.decode(new Uint8Array(ptBuf))
 }

@@ -1,5 +1,6 @@
 import { bufToBase64, base64ToBuf, textEncoder } from '../crypto/keys.js'
 import { loadWrappedSession } from '../crypto/keys.js'
+import { AAD_FILE_PREFIX } from '../constants/protocol.js'
 import { unwrapSessionKey } from './cryptoSession.js'
 
 // Upload a file in encrypted chunks to the server for a session
@@ -29,7 +30,7 @@ export async function uploadFileChunks({ apiUrl, token, sessionId, passphrase, f
   const fnameHashBuf = await crypto.subtle.digest('SHA-256', fnameBuf)
   const filenameHash = bufToBase64(fnameHashBuf)
   const fnameIv = crypto.getRandomValues(new Uint8Array(12))
-  const fnameAadString = `${sessionId}|fname|${senderUsername}`
+  const fnameAadString = `${AAD_FILE_PREFIX}|${sessionId}|${senderUsername}|fname-meta`
   const fnameAadBuf = new TextEncoder().encode(fnameAadString)
   const fnameCt = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: fnameIv, additionalData: fnameAadBuf }, aesKey, fnameBuf.buffer)
 
@@ -39,14 +40,16 @@ export async function uploadFileChunks({ apiUrl, token, sessionId, passphrase, f
     const chunkBuf = await blob.arrayBuffer()
 
     const iv = crypto.getRandomValues(new Uint8Array(12))
-    const timestampNum = Date.now()
+    // Use ISO timestamp for forward-compat with server Date serialization
+    const timestampIso = new Date().toISOString()
     const counter = ++counterLocal
-    const aadString = `${sessionId}|${counter}|${timestampNum}|${senderUsername}|${chunkIndex}`
+    const aadString = `${AAD_FILE_PREFIX}|${sessionId}|${senderUsername}|${counter}|${chunkIndex}|${timestampIso}`
     const aadBuf = textEncoder.encode(aadString)
 
     const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aadBuf }, aesKey, chunkBuf)
 
     const body = {
+      // server-required
       sessionId,
       filenameHash,
       filenameIv: bufToBase64(fnameIv.buffer),
@@ -56,9 +59,19 @@ export async function uploadFileChunks({ apiUrl, token, sessionId, passphrase, f
       totalChunks,
       ciphertext: bufToBase64(ct),
       iv: bufToBase64(iv.buffer),
-      aad: bufToBase64(aadBuf.buffer),
+      // group-unique envelope fields
+      proto: 'cl-file-v2022',
+      group: 'maadehah-hania-rubban-se-2022',
+      session: sessionId,
+      from: senderUsername,
+      ctr: counter,
+      isLast: (chunkIndex + 1) === totalChunks,
+      ts: timestampIso,
+      aad: aadString,
+      // legacy field still provided but not used by server decrypt
+      aad_b64: bufToBase64(aadBuf.buffer),
       counter,
-      timestamp: timestampNum
+      timestamp: timestampIso
     }
 
     let res = await fetch(`${apiUrl}/api/files/chunk`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
@@ -72,11 +85,11 @@ export async function uploadFileChunks({ apiUrl, token, sessionId, passphrase, f
           counterLocal = highestServer2
           // rebuild AAD and re-encrypt with new counter
           const counter2 = ++counterLocal
-          const aadString2 = `${sessionId}|${counter2}|${Date.now()}|${senderUsername}|${chunkIndex}`
+          const aadString2 = `${AAD_FILE_PREFIX}|${sessionId}|${senderUsername}|${counter2}|${chunkIndex}|${new Date().toISOString()}`
           const aadBuf2 = new TextEncoder().encode(aadString2)
           const iv2 = crypto.getRandomValues(new Uint8Array(12))
           const ct2 = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv2, additionalData: aadBuf2 }, aesKey, chunkBuf)
-          const body2 = { ...body, counter: counter2, iv: bufToBase64(iv2.buffer), aad: bufToBase64(aadBuf2.buffer), ciphertext: bufToBase64(ct2) }
+          const body2 = { ...body, counter: counter2, ctr: counter2, iv: bufToBase64(iv2.buffer), aad: aadString2, aad_b64: bufToBase64(aadBuf2.buffer), ciphertext: bufToBase64(ct2), ts: Date.now() }
           res = await fetch(`${apiUrl}/api/files/chunk`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body2) })
         }
       } catch {}
@@ -104,17 +117,66 @@ export async function fetchAndAssembleFile({ apiUrl, token, sessionId, passphras
   const fnameBuf = new TextEncoder().encode(filename)
   const fnameHashBuf = await crypto.subtle.digest('SHA-256', fnameBuf)
   const filenameHash = bufToBase64(fnameHashBuf)
-  const res = await fetch(`${apiUrl}/api/files/${encodeURIComponent(sessionId)}?filenameHash=${encodeURIComponent(filenameHash)}`, { headers: { Authorization: `Bearer ${token}` } })
+  let res = await fetch(`${apiUrl}/api/files/${encodeURIComponent(sessionId)}?filenameHash=${encodeURIComponent(filenameHash)}`, { headers: { Authorization: `Bearer ${token}` } })
   if (!res.ok) throw new Error('Failed to fetch file chunks')
-  const data = await res.json()
-  const chunks = (data.chunks || []).sort((a, b) => a.chunkIndex - b.chunkIndex)
+  let data = await res.json()
+  let chunks = (data.chunks || []).sort((a, b) => a.chunkIndex - b.chunkIndex)
+
+  // Fallback for legacy records where filenameHash was backfilled server-side differently
+  if (chunks.length === 0) {
+    res = await fetch(`${apiUrl}/api/files/${encodeURIComponent(sessionId)}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) throw new Error('Failed to fetch file chunks (fallback)')
+    data = await res.json()
+    const allChunks = (data.chunks || [])
+    // Find group by decrypting first-chunk filename metadata
+    const groups = new Map()
+    for (const c of allChunks) {
+      if (!groups.has(c.filenameHash)) groups.set(c.filenameHash, [])
+      groups.get(c.filenameHash).push(c)
+    }
+    let matched = []
+    for (const arr of groups.values()) {
+      const first = arr[0]
+      try {
+        const iv = base64ToBuf(first.filenameIv)
+        const aad = base64ToBuf(first.filenameAad)
+        const ct = base64ToBuf(first.filenameCiphertext)
+        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, ct)
+        const name = new TextDecoder().decode(new Uint8Array(pt))
+        if (name === filename) {
+          matched = arr.sort((a, b) => a.chunkIndex - b.chunkIndex)
+          break
+        }
+      } catch {}
+    }
+    chunks = matched
+  }
   const parts = []
   for (const c of chunks) {
     const ct = base64ToBuf(c.ciphertext)
     const ivBuf = base64ToBuf(c.iv)
-    const aadBuf = base64ToBuf(c.aad)
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf, additionalData: aadBuf }, aesKey, ct)
-    parts.push(new Uint8Array(plain))
+    // Attempt decryption with ISO timestamp AAD first
+    const tryAads = []
+    tryAads.push(`${AAD_FILE_PREFIX}|${sessionId}|${c.senderUsername}|${c.counter}|${c.chunkIndex}|${c.timestamp}`)
+    // If server returned ISO but encryption used numeric epoch, try numeric milliseconds too
+    try {
+      const ms = typeof c.timestamp === 'number' ? c.timestamp : new Date(c.timestamp).getTime()
+      if (Number.isFinite(ms)) tryAads.push(`${AAD_FILE_PREFIX}|${sessionId}|${c.senderUsername}|${c.counter}|${c.chunkIndex}|${ms}`)
+    } catch {}
+    let decrypted = null
+    let lastErr = null
+    for (const a of tryAads) {
+      try {
+        const aadBuf = new TextEncoder().encode(a)
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf, additionalData: aadBuf }, aesKey, ct)
+        decrypted = plain
+        break
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    if (!decrypted) throw lastErr || new Error('Decryption failed')
+    parts.push(new Uint8Array(decrypted))
   }
 
   // concatenate

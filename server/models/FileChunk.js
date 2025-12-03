@@ -20,7 +20,8 @@ const fileChunkSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 }, { timestamps: true })
 
-fileChunkSchema.index({ sessionId: 1, filename: 1, chunkIndex: 1 }, { unique: true })
+// Ensure uniqueness per session, file (by hashed identifier), and chunk index
+fileChunkSchema.index({ sessionId: 1, filenameHash: 1, chunkIndex: 1 }, { unique: true })
 
 const FileChunk = mongoose.model('FileChunk', fileChunkSchema)
 export default FileChunk
